@@ -1,0 +1,198 @@
+name: Build Driver Pro v30 Native UI Fix
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+
+      - name: Detect permanent signing alias
+        shell: bash
+        run: |
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v30 Base UI
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v25-navigation.yml" -o v25-source.yml
+          python3 <<'PATCH'
+          from pathlib import Path
+          src = Path('v25-source.yml').read_text(encoding='utf-8')
+          marker = "          python3 <<'PY'\n"
+          start = src.index(marker) + len(marker)
+          end = src.index("\n          PY", start)
+          code = src[start:end]
+          lines = code.splitlines()
+          code = "\n".join((ln[10:] if ln.startswith('          ') else ln) for ln in lines) + "\n"
+
+          code = code.replace('&v=25', '&v=30')
+          code = code.replace('1.0.25', '1.0.30')
+          code = code.replace('android-v25', 'android-v30')
+          code = code.replace('versionCode 25', 'versionCode 30')
+          code = code.replace("versionName '1.0.25'", "versionName '1.0.30'")
+
+          old = ".dp25stop{display:flex;gap:8px;align-items:flex-end}.dp25stop .dp25field{flex:1}"
+          new = ".dp25stop{display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important;align-items:end!important;width:100%!important}.dp25stop .dp25field{min-width:0!important;width:100%!important;max-width:none!important}.dp25stop .dp25input{width:100%!important;min-width:0!important}.dp25stop .dp25suggest{left:0!important;right:0!important;width:auto!important;max-width:100%!important}"
+          if old not in code:
+              raise SystemExit('v25 stop CSS anchor not found')
+          code = code.replace(old, new)
+
+          old2 = ".dp25danger{background:#522634;color:#fff}"
+          new2 = ".dp25danger{background:#522634;color:#fff;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;margin:0!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:22px!important;line-height:1!important}"
+          if old2 not in code:
+              raise SystemExit('v25 delete button CSS anchor not found')
+          code = code.replace(old2, new2)
+
+          old3 = ".dp25close{float:right;width:48px;height:48px;"
+          new3 = ".dp25close{float:right;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;"
+          if old3 in code:
+              code = code.replace(old3, new3)
+
+          # Rota Rápida: mantém a ferramenta manual como função secundária.
+          code = code.replace('NAVEGAÇÃO', 'ROTA RÁPIDA')
+          code = code.replace('🗺️ Iniciar transporte', '🗺️ Planejar deslocamento')
+          code = code.replace('Origem • paradas • destino final', 'Consultar rota • paradas • imprevistos')
+          code = code.replace('ROTA DA CORRIDA', 'ROTA RÁPIDA')
+          code = code.replace('Iniciar transporte', 'Planejar deslocamento')
+          code = code.replace('Busque endereços, adicione paradas e abra a rota.', 'Monte uma rota avulsa, adicione paradas e abra no navegador.')
+          Path('/tmp/apply_v26.py').write_text(code, encoding='utf-8')
+          PATCH
+
+          python3 /tmp/apply_v26.py
+
+          grep -q "versionCode 30" app/build.gradle
+          grep -q "versionName '1.0.30'" app/build.gradle
+          grep -q "grid-template-columns:minmax(0,1fr) 48px" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "width:48px!important" app/src/main/java/com/driverpro/app/MainActivity.java
+
+
+      - name: Apply v30 native UI fixes
+        shell: bash
+        env:
+          V30_METHOD_B64: CiAgcHJpdmF0ZSB2b2lkIGluamVjdFYzME5hdGl2ZVVpRml4KCkgewogICAgaWYgKHdlYlZpZXcgPT0gbnVsbCkgcmV0dXJuOwogICAgU3RyaW5nIGpzID0KICAgICAgIihmdW5jdGlvbigpe3RyeXsiICsKICAgICAgImlmKHdpbmRvdy5fX2RwMzBJbnN0YWxsZWQpcmV0dXJuO3dpbmRvdy5fX2RwMzBJbnN0YWxsZWQ9dHJ1ZTsiICsKICAgICAgInZhciBzdD1kb2N1bWVudC5jcmVhdGVFbGVtZW50KCdzdHlsZScpO3N0LmlkPSdkcDMwU3R5bGUnO3N0LnRleHRDb250ZW50PSIgKwogICAgICAiJy5kcDMwcm91dGV7bWFyZ2luOjE2cHggMCFpbXBvcnRhbnQ7cGFkZGluZzoxNHB4IWltcG9ydGFudDtib3JkZXI6MXB4IHNvbGlkICMzMTViN2QhaW1wb3J0YW50O2JvcmRlci1yYWRpdXM6MThweCFpbXBvcnRhbnQ7YmFja2dyb3VuZDojMDkxZDMxIWltcG9ydGFudH0uZHAzMHJvdXRlVGl0bGV7Zm9udC1zaXplOjE0cHghaW1wb3J0YW50O2NvbG9yOiNmM2M5NWQhaW1wb3J0YW50O2ZvbnQtd2VpZ2h0OjgwMCFpbXBvcnRhbnQ7bWFyZ2luOjAgMCAxMHB4IDJweCFpbXBvcnRhbnR9LmRwMzByb3V0ZUdyaWR7ZGlzcGxheTpncmlkIWltcG9ydGFudDtncmlkLXRlbXBsYXRlLWNvbHVtbnM6bWlubWF4KDAsMWZyKSBtaW5tYXgoMCwxZnIpIWltcG9ydGFudDtnYXA6MTBweCFpbXBvcnRhbnQ7d2lkdGg6MTAwJSFpbXBvcnRhbnR9LmRwMzByb3V0ZUdyaWQ+YnV0dG9ue3dpZHRoOjEwMCUhaW1wb3J0YW50O21pbi13aWR0aDowIWltcG9ydGFudDttYXgtd2lkdGg6bm9uZSFpbXBvcnRhbnQ7aGVpZ2h0OjU2cHghaW1wb3J0YW50O21pbi1oZWlnaHQ6NTZweCFpbXBvcnRhbnQ7bWF4LWhlaWdodDo1NnB4IWltcG9ydGFudDttYXJnaW46MCFpbXBvcnRhbnQ7cGFkZGluZzowIDhweCFpbXBvcnRhbnQ7Ym9yZGVyLXJhZGl1czoxNHB4IWltcG9ydGFudDtmb250LXNpemU6MTVweCFpbXBvcnRhbnQ7Zm9udC13ZWlnaHQ6ODUwIWltcG9ydGFudDtsaW5lLWhlaWdodDoxIWltcG9ydGFudDtkaXNwbGF5OmZsZXghaW1wb3J0YW50O2FsaWduLWl0ZW1zOmNlbnRlciFpbXBvcnRhbnQ7anVzdGlmeS1jb250ZW50OmNlbnRlciFpbXBvcnRhbnQ7d2hpdGUtc3BhY2U6bm93cmFwIWltcG9ydGFudH0uZHAzMG1hcHN7YmFja2dyb3VuZDojZThiZDRmIWltcG9ydGFudDtiYWNrZ3JvdW5kLWltYWdlOm5vbmUhaW1wb3J0YW50O2NvbG9yOiMxMDIwMzMhaW1wb3J0YW50O2JvcmRlcjowIWltcG9ydGFudH0uZHAzMHdhemV7YmFja2dyb3VuZDojMTIzZDYzIWltcG9ydGFudDtiYWNrZ3JvdW5kLWltYWdlOm5vbmUhaW1wb3J0YW50O2NvbG9yOiNmZmYhaW1wb3J0YW50O2JvcmRlcjoxcHggc29saWQgIzMxNWI3ZCFpbXBvcnRhbnR9LmRwMzB0YXB7Y3Vyc29yOnBvaW50ZXIhaW1wb3J0YW50O3Bvc2l0aW9uOnJlbGF0aXZlIWltcG9ydGFudH0uZHAzMHRhcDphZnRlcntjb250ZW50Olwi4oC6XCI7cG9zaXRpb246YWJzb2x1dGU7cmlnaHQ6MjJweDt0b3A6NTAlO3RyYW5zZm9ybTp0cmFuc2xhdGVZKC01MCUpO2ZvbnQtc2l6ZTozNHB4O2ZvbnQtd2VpZ2h0OjcwMDtjb2xvcjojZjNjOTVkO2xpbmUtaGVpZ2h0OjF9Jztkb2N1bWVudC5oZWFkLmFwcGVuZENoaWxkKHN0KTsiICsKICAgICAgImZ1bmN0aW9uIHR4KGUpe3JldHVybiBTdHJpbmcoZSYmZS50ZXh0Q29udGVudHx8JycpLnRyaW0oKX0iICsKICAgICAgImZ1bmN0aW9uIHZpcyhlKXtpZighZSlyZXR1cm4gZmFsc2U7dmFyIHI9ZS5nZXRCb3VuZGluZ0NsaWVudFJlY3QoKTtyZXR1cm4gci53aWR0aD4yMCYmci5oZWlnaHQ+MjB9IiArCiAgICAgICJmdW5jdGlvbiBhY3RpdmF0ZUxhYmVsKGxhYmVsKXt2YXIgbm9kZXM9QXJyYXkuZnJvbShkb2N1bWVudC5xdWVyeVNlbGVjdG9yQWxsKCcqJykpLmZpbHRlcihmdW5jdGlvbihlKXtyZXR1cm4gdmlzKGUpJiZ0eChlKS50b0xvd2VyQ2FzZSgpPT09bGFiZWwudG9Mb3dlckNhc2UoKX0pO2Zvcih2YXIgaT0wO2k8bm9kZXMubGVuZ3RoO2krKyl7dmFyIGU9bm9kZXNbaV07Zm9yKHZhciBqPTA7ajw2JiZlO2orKyxlPWUucGFyZW50RWxlbWVudCl7dHJ5e2UuZGlzcGF0Y2hFdmVudChuZXcgTW91c2VFdmVudCgnY2xpY2snLHtidWJibGVzOnRydWUsY2FuY2VsYWJsZTp0cnVlLHZpZXc6d2luZG93fSkpO2lmKGUuY2xpY2spZS5jbGljaygpO31jYXRjaChfKXt9fX1yZXR1cm4gbm9kZXMubGVuZ3RoPjB9IiArCiAgICAgICJmdW5jdGlvbiBmaW5kQ2FyZChsYWJlbCl7dmFyIGFsbD1BcnJheS5mcm9tKGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3JBbGwoJ2RpdixzZWN0aW9uLGFydGljbGUnKSk7dmFyIGhpdHM9YWxsLmZpbHRlcihmdW5jdGlvbihlKXt2YXIgcz10eChlKSxyPWUuZ2V0Qm91bmRpbmdDbGllbnRSZWN0KCk7cmV0dXJuIHZpcyhlKSYmci53aWR0aD4yODAmJnIuaGVpZ2h0PjEzMCYmci5oZWlnaHQ8MzMwJiZzLnRvVXBwZXJDYXNlKCkuc3RhcnRzV2l0aChsYWJlbCkmJnMubGVuZ3RoPDkwfSk7aGl0cy5zb3J0KGZ1bmN0aW9uKGEsYil7cmV0dXJuIGEuZ2V0Qm91bmRpbmdDbGllbnRSZWN0KCkuaGVpZ2h0LWIuZ2V0Qm91bmRpbmdDbGllbnRSZWN0KCkuaGVpZ2h0fSk7cmV0dXJuIGhpdHNbMF18fG51bGx9IiArCiAgICAgICJmdW5jdGlvbiB3aXJlQ2FyZChsYWJlbCx0YWIpe3ZhciBjPWZpbmRDYXJkKGxhYmVsKTtpZighY3x8Yy5kYXRhc2V0LmRwMzB3aXJlZClyZXR1cm47Yy5kYXRhc2V0LmRwMzB3aXJlZD0nMSc7Yy5jbGFzc0xpc3QuYWRkKCdkcDMwdGFwJyk7Yy5vbmNsaWNrPWZ1bmN0aW9uKGUpe2lmKGUudGFyZ2V0LmNsb3Nlc3QoJ2J1dHRvbixhJykpcmV0dXJuO2UucHJldmVudERlZmF1bHQoKTtlLnN0b3BQcm9wYWdhdGlvbigpO2FjdGl2YXRlTGFiZWwodGFiKX19IiArCiAgICAgICJmdW5jdGlvbiB2YWx1ZUFmdGVyKGxhYmVsLHJvb3Qpe3ZhciBlbHM9QXJyYXkuZnJvbShyb290LnF1ZXJ5U2VsZWN0b3JBbGwoJyonKSkuZmlsdGVyKGZ1bmN0aW9uKGUpe3JldHVybiB0eChlKT09PWxhYmVsfSk7Zm9yKHZhciBpPTA7aTxlbHMubGVuZ3RoO2krKyl7dmFyIGU9ZWxzW2ldLHA9ZS5wYXJlbnRFbGVtZW50O2lmKCFwKWNvbnRpbnVlO3ZhciBraWRzPUFycmF5LmZyb20ocC5jaGlsZHJlbiksaWR4PWtpZHMuaW5kZXhPZihlKTtpZihpZHg+PTAmJmtpZHNbaWR4KzFdKXt2YXIgdj10eChraWRzW2lkeCsxXSk7aWYodiYmdiE9PWxhYmVsKXJldHVybiB2fXZhciBsaW5lcz1TdHJpbmcocC5pbm5lclRleHR8fCcnKS5zcGxpdCgvXFxuKy8pLm1hcChmdW5jdGlvbihzKXtyZXR1cm4gcy50cmltKCl9KS5maWx0ZXIoQm9vbGVhbik7dmFyIGxpPWxpbmVzLmluZGV4T2YobGFiZWwpO2lmKGxpPj0wJiZsaW5lc1tsaSsxXSlyZXR1cm4gbGluZXNbbGkrMV19cmV0dXJuICcnfSIgKwogICAgICAiZnVuY3Rpb24gbWFwcyhvLGQpe2lmKCFvfHwhZClyZXR1cm4gYWxlcnQoJ09yaWdlbSBvdSBkZXN0aW5vIG7Do28gZW5jb250cmFkb3MgbmVzdGEgY29ycmlkYS4nKTt3aW5kb3cubG9jYXRpb24uaHJlZj0naHR0cHM6Ly93d3cuZ29vZ2xlLmNvbS9tYXBzL2Rpci8/YXBpPTEmb3JpZ2luPScrZW5jb2RlVVJJQ29tcG9uZW50KG8pKycmZGVzdGluYXRpb249JytlbmNvZGVVUklDb21wb25lbnQoZCkrJyZ0cmF2ZWxtb2RlPWRyaXZpbmcnfSIgKwogICAgICAiZnVuY3Rpb24gd2F6ZShkKXtpZighZClyZXR1cm4gYWxlcnQoJ0Rlc3Rpbm8gbsOjbyBlbmNvbnRyYWRvIG5lc3RhIGNvcnJpZGEuJyk7d2luZG93LmxvY2F0aW9uLmhyZWY9J2h0dHBzOi8vd2F6ZS5jb20vdWw/cT0nK2VuY29kZVVSSUNvbXBvbmVudChkKSsnJm5hdmlnYXRlPXllcyd9IiArCiAgICAgICJmdW5jdGlvbiByaWRlKCl7dmFyIHRpdGxlPUFycmF5LmZyb20oZG9jdW1lbnQucXVlcnlTZWxlY3RvckFsbCgnKicpKS5maW5kKGZ1bmN0aW9uKGUpe3JldHVybiB2aXMoZSkmJnR4KGUpPT09J0RldGFsaGVzIGRhIGNvcnJpZGEnfSk7aWYoIXRpdGxlKXJldHVybjt2YXIgcm9vdD10aXRsZTtmb3IodmFyIGk9MDtpPDgmJnJvb3QucGFyZW50RWxlbWVudDtpKyspe3Jvb3Q9cm9vdC5wYXJlbnRFbGVtZW50O3ZhciBzPVN0cmluZyhyb290LmlubmVyVGV4dHx8JycpO2lmKHMuaW5jbHVkZXMoJ1ZpbmN1bGFyIHZvbycpJiZzLmluY2x1ZGVzKCdFeGNsdWlyIGNvcnJpZGEnKSlicmVha31pZighcm9vdHx8cm9vdC5kYXRhc2V0LmRwMzByaWRlKXJldHVybjtyb290LmRhdGFzZXQuZHAzMHJpZGU9JzEnO3ZhciBvPXZhbHVlQWZ0ZXIoJ09yaWdlbScscm9vdCksZD12YWx1ZUFmdGVyKCdEZXN0aW5vJyxyb290KTt2YXIgYnRucz1BcnJheS5mcm9tKHJvb3QucXVlcnlTZWxlY3RvckFsbCgnYnV0dG9uJykpO3ZhciBmbGlnaHQ9YnRucy5maW5kKGZ1bmN0aW9uKGIpe3JldHVybiB0eChiKS5pbmNsdWRlcygnVmluY3VsYXIgdm9vJyl9KTt2YXIgY2xvc2U9YnRucy5maW5kKGZ1bmN0aW9uKGIpe3JldHVybiB0eChiKT09PSdGZWNoYXInfSk7dmFyIGJveD1kb2N1bWVudC5jcmVhdGVFbGVtZW50KCdkaXYnKTtib3guY2xhc3NOYW1lPSdkcDMwcm91dGUnO2JveC5pbm5lckhUTUw9JzxkaXYgY2xhc3M9ZHAzMHJvdXRlVGl0bGU+8J+Xuu+4jyBST1RBIERBIENPUlJJREE8L2Rpdj48ZGl2IGNsYXNzPWRwMzByb3V0ZUdyaWQ+PGJ1dHRvbiBjbGFzcz1cImRwMzBtYXBzXCI+R29vZ2xlIE1hcHM8L2J1dHRvbj48YnV0dG9uIGNsYXNzPVwiZHAzMHdhemVcIj5XYXplPC9idXR0b24+PC9kaXY+Jztib3gucXVlcnlTZWxlY3RvcignLmRwMzBtYXBzJykub25jbGljaz1mdW5jdGlvbigpe21hcHMobyxkKX07Ym94LnF1ZXJ5U2VsZWN0b3IoJy5kcDMwd2F6ZScpLm9uY2xpY2s9ZnVuY3Rpb24oKXt3YXplKGQpfTtpZihmbGlnaHQmJmZsaWdodC5wYXJlbnRFbGVtZW50KWZsaWdodC5wYXJlbnRFbGVtZW50Lmluc2VydEJlZm9yZShib3gsZmxpZ2h0KTtlbHNlIHJvb3QuYXBwZW5kQ2hpbGQoYm94KTtpZihjbG9zZSYmY2xvc2UucGFyZW50RWxlbWVudCl7dmFyIHA9Y2xvc2UucGFyZW50RWxlbWVudDtjbG9zZS5yZW1vdmUoKTtwLmFwcGVuZENoaWxkKGNsb3NlKX19IiArCiAgICAgICJmdW5jdGlvbiBydW4oKXt3aXJlQ2FyZCgnQ0xJRU5URVMnLCdDbGllbnRlcycpO3dpcmVDYXJkKCdDT1RBw4fDlUVTJywnQ290YcOnw7VlcycpO3JpZGUoKX0iICsKICAgICAgInJ1bigpO25ldyBNdXRhdGlvbk9ic2VydmVyKGZ1bmN0aW9uKCl7c2V0VGltZW91dChydW4sMjApfSkub2JzZXJ2ZShkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQse2NoaWxkTGlzdDp0cnVlLHN1YnRyZWU6dHJ1ZX0pO3NldEludGVydmFsKHJ1biwxMDAwKTsiICsKICAgICAgIn1jYXRjaChlKXtjb25zb2xlLmxvZygnZHAzMCcsZSl9fSkoKTsiOwogICAgd2ViVmlldy5ldmFsdWF0ZUphdmFzY3JpcHQoanMsIG51bGwpOwogIH0KCiAgcHJpdmF0ZSB2b2lkIHJldmVhbFdlYlZpZXdXaGVuUmVhZHkoZmluYWwgaW50IGF0dGVtcHQpIHsKICAgIGlmICh3ZWJWaWV3ID09IG51bGwpIHJldHVybjsKICAgIHdlYlZpZXcuZXZhbHVhdGVKYXZhc2NyaXB0KAogICAgICAiKGZ1bmN0aW9uKCl7dmFyIHQ9KGRvY3VtZW50LmJvZHkmJmRvY3VtZW50LmJvZHkuaW5uZXJUZXh0KXx8Jyc7cmV0dXJuICEhKHQuaW5jbHVkZXMoJ1JFU1VNTyBERSBIT0pFJyl8fHQuaW5jbHVkZXMoJ0NMSU1BIEFHT1JBJyl8fHQuaW5jbHVkZXMoJ0RldGFsaGVzIGRhIGNvcnJpZGEnKSk7fSkoKSIsCiAgICAgIHZhbHVlIC0+IHsKICAgICAgICBib29sZWFuIHJlYWR5ID0gInRydWUiLmVxdWFscyh2YWx1ZSk7CiAgICAgICAgaWYgKHJlYWR5IHx8IGF0dGVtcHQgPj0gMjApIHsKICAgICAgICAgIGluamVjdFN0YWJsZVVpKCk7CiAgICAgICAgICBpbmplY3RXZWF0aGVyTmF0aXZlVWkoKTsKICAgICAgICAgIGluamVjdE5hdmlnYXRpb25OYXRpdmVVaSgpOwogICAgICAgICAgaW5qZWN0VjMwTmF0aXZlVWlGaXgoKTsKICAgICAgICAgIGhhbmRsZXIucG9zdERlbGF5ZWQoKCkgLT4gewogICAgICAgICAgICBpZiAod2ViVmlldyAhPSBudWxsKSB7CiAgICAgICAgICAgICAgd2ViVmlldy5zZXRBbHBoYSgxZik7CiAgICAgICAgICAgICAgd2ViVmlldy5zZXRWaXNpYmlsaXR5KGFuZHJvaWQudmlldy5WaWV3LlZJU0lCTEUpOwogICAgICAgICAgICB9CiAgICAgICAgICB9LCAxMjBMKTsKICAgICAgICB9IGVsc2UgewogICAgICAgICAgaGFuZGxlci5wb3N0RGVsYXllZCgoKSAtPiByZXZlYWxXZWJWaWV3V2hlblJlYWR5KGF0dGVtcHQgKyAxKSwgMTAwTCk7CiAgICAgICAgfQogICAgICB9CiAgICApOwogIH0K
+        run: |
+          python3 <<'PY30'
+          from pathlib import Path
+          import os, base64
+          p = Path("app/src/main/java/com/driverpro/app/MainActivity.java")
+          s = p.read_text(encoding="utf-8")
+
+          s = s.replace(
+              "webView.loadUrl(HOME);",
+              "webView.setAlpha(0f);\n    webView.setVisibility(android.view.View.INVISIBLE);\n    webView.loadUrl(HOME);"
+          )
+
+          s = s.replace(
+              "injectStableUi();\n      }",
+              "revealWebViewWhenReady(0);\n      }"
+          )
+
+          s = s.replace(
+              "injectNavigationNativeUi();",
+              "injectNavigationNativeUi();\n        injectV30NativeUiFix();"
+          )
+
+          method = base64.b64decode(os.environ["V30_METHOD_B64"]).decode("utf-8")
+          pos = s.rfind("\n}")
+          if pos < 0:
+              raise SystemExit("MainActivity closing brace not found")
+          s = s[:pos] + "\n" + method + s[pos:]
+          p.write_text(s, encoding="utf-8")
+          PY30
+          grep -q "injectV30NativeUiFix" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "revealWebViewWhenReady" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "dp30routeGrid" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "setVisibility(android.view.View.INVISIBLE)" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v30
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v30-Native-UI-Fix.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v30-Native-UI-Fix-APK
+          path: Driver-Pro-v30-Native-UI-Fix.apk
+          retention-days: 30
