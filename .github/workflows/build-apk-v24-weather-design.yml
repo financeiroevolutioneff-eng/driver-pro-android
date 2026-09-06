@@ -1,0 +1,173 @@
+name: Build Driver Pro v24 Weather Design
+
+'on':
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-apk-v24-weather-design.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v24 weather design
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v23-weather-native.yml" -o v23.yml
+          python3 <<'PY'
+          from pathlib import Path
+
+          mp = Path('app/src/main/java/com/driverpro/app/MainActivity.java')
+          pp = Path('app/src/main/java/com/driverpro/app/PushBridge.java')
+          gp = Path('app/build.gradle')
+          wf = Path('v23.yml').read_text(encoding='utf-8')
+
+          marker = "weather_method = r'''"
+          if marker not in wf:
+              raise SystemExit('v23 weather method not found')
+          weather = wf.split(marker,1)[1].split("\n          '''",1)[0]
+          weather = weather.replace('dp23','dp24')
+          weather = weather.replace('Dados: Climatempo Advisor','Dados: WeatherAPI')
+          weather = weather.replace('Carregando Climatempo…','Carregando clima…')
+          weather = weather.replace('Climatempo aguardando ativação','Clima temporariamente indisponível')
+          weather = weather.replace('Climatempo ainda não configurado','Clima ainda não disponível')
+          weather = weather.replace('Climatempo indisponível','Clima indisponível')
+
+          old_close = "'#dp24WxClose{float:right;width:40px;height:40px;border-radius:22px;border:1px solid #315b7d;background:#0b2944;color:#fff;font-size:22px}.dp24days"
+          new_close = "'#dp24WxClose{float:right;width:48px;height:48px;border-radius:50%;border:1px solid rgba(255,255,255,.22);background:linear-gradient(145deg,#173b5b,#091f35);color:#fff;font-size:30px;font-weight:400;line-height:1;display:flex;align-items:center;justify-content:center;padding:0;box-shadow:0 6px 18px #0005;cursor:pointer;-webkit-tap-highlight-color:transparent}.dp24days"
+          if old_close not in weather:
+              raise SystemExit('close button css anchor not found')
+          weather = weather.replace(old_close,new_close)
+
+          css_anchor = "'.dp24days{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-top:16px}.dp24day{background:#0d2a46;border:1px solid #315b7d;border-radius:16px;padding:12px;text-align:center}';"
+          css_new = "'.dp24days{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-top:16px}.dp24day{background:#0d2a46;border:1px solid #315b7d;border-radius:16px;padding:12px;text-align:center}.dp24hours{display:flex;gap:9px;overflow-x:auto;padding:4px 0 8px;scrollbar-width:none}.dp24hour{min-width:92px;background:#0b2742;border:1px solid #284f70;border-radius:15px;padding:11px 9px;text-align:center}.dp24hour .tm{font-weight:800}.dp24hour .ti{font-size:26px;margin:5px 0}.dp24hour .rn{font-size:11px;opacity:.72}';"
+          if css_anchor not in weather:
+              raise SystemExit('weather css anchor not found')
+          weather = weather.replace(css_anchor, css_new)
+
+          js_anchor = "var c=cur(d),m=document.createElement('div');var cards=days(d).map"
+          js_new = "var c=cur(d),m=document.createElement('div');var hs=Array.isArray(d.remainingToday)?d.remainingToday:[];var hourly=hs.filter(function(x,i){return i%2===0;}).slice(0,6).map(function(x){var tm=String(x.time||'').split(' ')[1]||'--:--';return '<div class=dp24hour><div class=tm>'+tm+'</div><div class=ti>'+icon(x.condition)+'</div><div><b>'+((x.temperature??'--'))+'°</b></div><div class=rn>💧 '+((x.rain_probability??0))+'%</div></div>';}).join('');var cards=days(d).map"
+          if js_anchor not in weather:
+              raise SystemExit('openWx anchor not found')
+          weather = weather.replace(js_anchor, js_new)
+
+          html_anchor = "<div class=dp24days>'+cards+'</div><div style=opacity:.5;font-size:11px;text-align:center;margin-top:14px>Dados: WeatherAPI</div>"
+          html_new = "<div class=dp24days>'+cards+'</div>'+(hourly?'<div style=font-size:17px;font-weight:800;margin:20px 0 10px>Restante de hoje</div><div class=dp24hours>'+hourly+'</div>':'')+'<div style=opacity:.5;font-size:11px;text-align:center;margin-top:14px>Dados: WeatherAPI</div>"
+          if html_anchor not in weather:
+              raise SystemExit('modal html anchor not found')
+          weather = weather.replace(html_anchor, html_new)
+
+          main = mp.read_text(encoding='utf-8')
+          if 'dp21FlightCard' not in main or 'injectStableUi()' not in main:
+              raise SystemExit('proven v21 source not found')
+          main = main.replace('&v=21','&v=24')
+          main = main.replace('injectStableUi();','injectStableUi();\n        injectWeatherNativeUi();')
+          pos = main.rfind('\n}')
+          if pos < 0:
+              raise SystemExit('MainActivity closing brace not found')
+          main = main[:pos] + '\n' + weather + main[pos:]
+          mp.write_text(main,encoding='utf-8')
+
+          push = pp.read_text(encoding='utf-8').replace('1.0.21','1.0.24').replace('android-v21','android-v24')
+          pp.write_text(push,encoding='utf-8')
+          gradle = gp.read_text(encoding='utf-8').replace('versionCode 21','versionCode 24').replace("versionName '1.0.21'","versionName '1.0.24'")
+          gp.write_text(gradle,encoding='utf-8')
+          PY
+
+          grep -q "versionCode 24" app/build.gradle
+          grep -q "versionName '1.0.24'" app/build.gradle
+          grep -q "Dados: WeatherAPI" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "Restante de hoje" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "dp24WxClose" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v24
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v24-Weather-Design-Permanent.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v24-Weather-Design-Permanent-APK
+          path: Driver-Pro-v24-Weather-Design-Permanent.apk
+          retention-days: 30
