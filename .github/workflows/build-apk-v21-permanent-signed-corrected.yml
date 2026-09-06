@@ -77,6 +77,10 @@ jobs:
           ! grep -q "pushdebug=1" app/src/main/java/com/driverpro/app/MainActivity.java
           ! grep -q "injectDiagnostics" app/src/main/java/com/driverpro/app/MainActivity.java
           grep -q "dp21FlightCard" app/src/main/java/com/driverpro/app/MainActivity.java
+        - name: Fix invalid Driver Pro logo
+        shell: bash
+        run: |
+          rm -f app/src/main/res/drawable/driver_pro_logo.png
 
       - name: Build permanently signed APK v21
         run: gradle :app:assembleRelease --stacktrace
