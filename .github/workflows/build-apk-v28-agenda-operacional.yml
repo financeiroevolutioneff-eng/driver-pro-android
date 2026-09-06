@@ -1,0 +1,182 @@
+name: Build Driver Pro v28 Agenda Operacional
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+
+      - name: Detect permanent signing alias
+        shell: bash
+        run: |
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v28 Base UI
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v25-navigation.yml" -o v25-source.yml
+          python3 <<'PATCH'
+          from pathlib import Path
+          src = Path('v25-source.yml').read_text(encoding='utf-8')
+          marker = "          python3 <<'PY'\n"
+          start = src.index(marker) + len(marker)
+          end = src.index("\n          PY", start)
+          code = src[start:end]
+          lines = code.splitlines()
+          code = "\n".join((ln[10:] if ln.startswith('          ') else ln) for ln in lines) + "\n"
+
+          code = code.replace('&v=25', '&v=28')
+          code = code.replace('1.0.25', '1.0.28')
+          code = code.replace('android-v25', 'android-v28')
+          code = code.replace('versionCode 25', 'versionCode 28')
+          code = code.replace("versionName '1.0.25'", "versionName '1.0.28'")
+
+          old = ".dp25stop{display:flex;gap:8px;align-items:flex-end}.dp25stop .dp25field{flex:1}"
+          new = ".dp25stop{display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important;align-items:end!important;width:100%!important}.dp25stop .dp25field{min-width:0!important;width:100%!important;max-width:none!important}.dp25stop .dp25input{width:100%!important;min-width:0!important}.dp25stop .dp25suggest{left:0!important;right:0!important;width:auto!important;max-width:100%!important}"
+          if old not in code:
+              raise SystemExit('v25 stop CSS anchor not found')
+          code = code.replace(old, new)
+
+          old2 = ".dp25danger{background:#522634;color:#fff}"
+          new2 = ".dp25danger{background:#522634;color:#fff;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;margin:0!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:22px!important;line-height:1!important}"
+          if old2 not in code:
+              raise SystemExit('v25 delete button CSS anchor not found')
+          code = code.replace(old2, new2)
+
+          old3 = ".dp25close{float:right;width:48px;height:48px;"
+          new3 = ".dp25close{float:right;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;"
+          if old3 in code:
+              code = code.replace(old3, new3)
+
+          # Rota Rápida: mantém a ferramenta manual como função secundária.
+          code = code.replace('NAVEGAÇÃO', 'ROTA RÁPIDA')
+          code = code.replace('🗺️ Iniciar transporte', '🗺️ Planejar deslocamento')
+          code = code.replace('Origem • paradas • destino final', 'Consultar rota • paradas • imprevistos')
+          code = code.replace('ROTA DA CORRIDA', 'ROTA RÁPIDA')
+          code = code.replace('Iniciar transporte', 'Planejar deslocamento')
+          code = code.replace('Busque endereços, adicione paradas e abra a rota.', 'Monte uma rota avulsa, adicione paradas e abra no navegador.')
+          Path('/tmp/apply_v26.py').write_text(code, encoding='utf-8')
+          PATCH
+
+          python3 /tmp/apply_v26.py
+
+          grep -q "versionCode 28" app/build.gradle
+          grep -q "versionName '1.0.28'" app/build.gradle
+          grep -q "grid-template-columns:minmax(0,1fr) 48px" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "width:48px!important" app/src/main/java/com/driverpro/app/MainActivity.java
+
+
+      - name: Apply v28 agenda operational enhancements
+        shell: bash
+        env:
+          V28_METHOD_B64: CiAgcHJpdmF0ZSB2b2lkIGluamVjdFYyOEFnZW5kYU9wZXJhdGlvbmFsVWkoKSB7CiAgICBpZiAod2ViVmlldyA9PSBudWxsKSByZXR1cm47CiAgICBTdHJpbmcganMgPQogICAgICAiKGZ1bmN0aW9uKCl7dHJ5eyIgKwogICAgICAiaWYod2luZG93Ll9fZHAyOEluc3RhbGxlZClyZXR1cm47d2luZG93Ll9fZHAyOEluc3RhbGxlZD10cnVlOyIgKwogICAgICAidmFyIHN0PWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ3N0eWxlJyk7c3QuaWQ9J2RwMjhTdHlsZSc7c3QudGV4dENvbnRlbnQ9IiArCiAgICAgICInLmRwMjhyb3V0ZXttYXJnaW46MTZweCAwO3BhZGRpbmc6MTZweDtib3JkZXI6MXB4IHNvbGlkICMzMTViN2Q7Ym9yZGVyLXJhZGl1czoxOHB4O2JhY2tncm91bmQ6IzA5MWQzMX0uZHAyOHJvdXRlVGl0bGV7Zm9udC1zaXplOjE0cHg7Y29sb3I6I2YzYzk1ZDtmb250LXdlaWdodDo4MDA7bWFyZ2luLWJvdHRvbToxMnB4fS5kcDI4cm91dGVHcmlke2Rpc3BsYXk6Z3JpZDtncmlkLXRlbXBsYXRlLWNvbHVtbnM6MWZyIDFmcjtnYXA6MTBweH0uZHAyOHJvdXRlQnRue21pbi1oZWlnaHQ6NzJweDtib3JkZXItcmFkaXVzOjE2cHg7Ym9yZGVyOjFweCBzb2xpZCAjMzE1YjdkO2ZvbnQtc2l6ZToxN3B4O2ZvbnQtd2VpZ2h0Ojg1MH0uZHAyOG1hcHN7YmFja2dyb3VuZDojZThiZDRmO2NvbG9yOiMxMDIwMzN9LmRwMjh3YXple2JhY2tncm91bmQ6IzEyM2Q2Mztjb2xvcjojZmZmfS5kcDI4Y2xpY2thYmxle2N1cnNvcjpwb2ludGVyO3Bvc2l0aW9uOnJlbGF0aXZlfS5kcDI4YXJyb3d7cG9zaXRpb246YWJzb2x1dGU7cmlnaHQ6MjJweDt0b3A6NTAlO3RyYW5zZm9ybTp0cmFuc2xhdGVZKC01MCUpO2ZvbnQtc2l6ZTozMHB4O2ZvbnQtd2VpZ2h0OjkwMDtjb2xvcjojZjNjOTVkO3BvaW50ZXItZXZlbnRzOm5vbmV9Jztkb2N1bWVudC5oZWFkLmFwcGVuZENoaWxkKHN0KTsiICsKICAgICAgImZ1bmN0aW9uIHQoZSl7cmV0dXJuIFN0cmluZyhlJiZlLnRleHRDb250ZW50fHwnJykudHJpbSgpfSIgKwogICAgICAiZnVuY3Rpb24gdmlzKGUpe2lmKCFlKXJldHVybiBmYWxzZTt2YXIgcj1lLmdldEJvdW5kaW5nQ2xpZW50UmVjdCgpO3JldHVybiByLndpZHRoPjIwJiZyLmhlaWdodD4yMH0iICsKICAgICAgImZ1bmN0aW9uIGNsaWNrVGFiKG5hbWUpe3ZhciBhbGw9QXJyYXkuZnJvbShkb2N1bWVudC5xdWVyeVNlbGVjdG9yQWxsKCdidXR0b24sYSxkaXYsc3BhbicpKTt2YXIgeD1hbGwuZmluZChmdW5jdGlvbihlKXtyZXR1cm4gdmlzKGUpJiZ0KGUpLnRvTG93ZXJDYXNlKCk9PT1uYW1lLnRvTG93ZXJDYXNlKCl9KTtpZih4KXt4LmNsaWNrKCk7cmV0dXJuIHRydWV9cmV0dXJuIGZhbHNlfSIgKwogICAgICAiZnVuY3Rpb24gZmluZENhcmQobGFiZWwpe3ZhciBhbGw9QXJyYXkuZnJvbShkb2N1bWVudC5xdWVyeVNlbGVjdG9yQWxsKCdkaXYsc2VjdGlvbixhcnRpY2xlJykpO3ZhciBoaXRzPWFsbC5maWx0ZXIoZnVuY3Rpb24oZSl7dmFyIHM9dChlKSxyPWUuZ2V0Qm91bmRpbmdDbGllbnRSZWN0KCk7cmV0dXJuIHZpcyhlKSYmci53aWR0aD4yNTAmJnIuaGVpZ2h0PjEwMCYmci5oZWlnaHQ8MzUwJiZzLnRvVXBwZXJDYXNlKCkuc3RhcnRzV2l0aChsYWJlbCkmJnMubGVuZ3RoPDEyMH0pO2hpdHMuc29ydChmdW5jdGlvbihhLGIpe3JldHVybiBhLmdldEJvdW5kaW5nQ2xpZW50UmVjdCgpLmhlaWdodC1iLmdldEJvdW5kaW5nQ2xpZW50UmVjdCgpLmhlaWdodH0pO3JldHVybiBoaXRzWzBdfHxudWxsfSIgKwogICAgICAiZnVuY3Rpb24gd2lyZUNhcmQobGFiZWwsdGFiKXt2YXIgYz1maW5kQ2FyZChsYWJlbCk7aWYoIWN8fGMuZGF0YXNldC5kcDI4d2lyZWQpcmV0dXJuO2MuZGF0YXNldC5kcDI4d2lyZWQ9JzEnO2MuY2xhc3NMaXN0LmFkZCgnZHAyOGNsaWNrYWJsZScpO3ZhciBhPWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ3NwYW4nKTthLmNsYXNzTmFtZT0nZHAyOGFycm93JzthLnRleHRDb250ZW50PSfinpwnO2MuYXBwZW5kQ2hpbGQoYSk7Yy5vbmNsaWNrPWZ1bmN0aW9uKGUpe2lmKGUudGFyZ2V0LmNsb3Nlc3QoJ2J1dHRvbixhJykpcmV0dXJuO2NsaWNrVGFiKHRhYil9fSIrCiAgICAgICJmdW5jdGlvbiB2YWx1ZUFmdGVyKGxhYmVsLHJvb3Qpe3ZhciBlbHM9QXJyYXkuZnJvbShyb290LnF1ZXJ5U2VsZWN0b3JBbGwoJyonKSkuZmlsdGVyKGZ1bmN0aW9uKGUpe3JldHVybiB0KGUpPT09bGFiZWx9KTtmb3IodmFyIGk9MDtpPGVscy5sZW5ndGg7aSsrKXt2YXIgZT1lbHNbaV0scD1lLnBhcmVudEVsZW1lbnQ7aWYoIXApY29udGludWU7dmFyIGtpZHM9QXJyYXkuZnJvbShwLmNoaWxkcmVuKSxpZHg9a2lkcy5pbmRleE9mKGUpO2lmKGlkeD49MCYma2lkc1tpZHgrMV0pe3ZhciB2PXQoa2lkc1tpZHgrMV0pO2lmKHYmJnYhPT1sYWJlbClyZXR1cm4gdn12YXIgbGluZXM9U3RyaW5nKHAuaW5uZXJUZXh0fHwnJykuc3BsaXQoL1xcbisvKS5tYXAoZnVuY3Rpb24ocyl7cmV0dXJuIHMudHJpbSgpfSkuZmlsdGVyKEJvb2xlYW4pO3ZhciBsaT1saW5lcy5pbmRleE9mKGxhYmVsKTtpZihsaT49MCYmbGluZXNbbGkrMV0pcmV0dXJuIGxpbmVzW2xpKzFdfXJldHVybiAnJ30iICsKICAgICAgImZ1bmN0aW9uIG1hcHMobyxkKXtpZighb3x8IWQpcmV0dXJuIGFsZXJ0KCdPcmlnZW0gb3UgZGVzdGlubyBuw6NvIGVuY29udHJhZG9zIG5lc3RhIGNvcnJpZGEuJyk7d2luZG93LmxvY2F0aW9uLmhyZWY9J2h0dHBzOi8vd3d3Lmdvb2dsZS5jb20vbWFwcy9kaXIvP2FwaT0xJm9yaWdpbj0nK2VuY29kZVVSSUNvbXBvbmVudChvKSsnJmRlc3RpbmF0aW9uPScrZW5jb2RlVVJJQ29tcG9uZW50KGQpKycmdHJhdmVsbW9kZT1kcml2aW5nJ30iICsKICAgICAgImZ1bmN0aW9uIHdhemUoZCl7aWYoIWQpcmV0dXJuIGFsZXJ0KCdEZXN0aW5vIG7Do28gZW5jb250cmFkbyBuZXN0YSBjb3JyaWRhLicpO3dpbmRvdy5sb2NhdGlvbi5ocmVmPSdodHRwczovL3dhemUuY29tL3VsP3E9JytlbmNvZGVVUklDb21wb25lbnQoZCkrJyZuYXZpZ2F0ZT15ZXMnfSIgKwogICAgICAiZnVuY3Rpb24gcmlkZSgpe3ZhciB0aXRsZT1BcnJheS5mcm9tKGRvY3VtZW50LnF1ZXJ5U2VsZWN0b3JBbGwoJyonKSkuZmluZChmdW5jdGlvbihlKXtyZXR1cm4gdmlzKGUpJiZ0KGUpPT09J0RldGFsaGVzIGRhIGNvcnJpZGEnfSk7aWYoIXRpdGxlKXJldHVybjt2YXIgcm9vdD10aXRsZTtmb3IodmFyIGk9MDtpPDgmJnJvb3QucGFyZW50RWxlbWVudDtpKyspe3Jvb3Q9cm9vdC5wYXJlbnRFbGVtZW50O3ZhciBzPVN0cmluZyhyb290LmlubmVyVGV4dHx8JycpO2lmKHMuaW5jbHVkZXMoJ1ZpbmN1bGFyIHZvbycpJiZzLmluY2x1ZGVzKCdFeGNsdWlyIGNvcnJpZGEnKSlicmVha31pZighcm9vdHx8cm9vdC5kYXRhc2V0LmRwMjhyaWRlKXJldHVybjtyb290LmRhdGFzZXQuZHAyOHJpZGU9JzEnO3ZhciBvPXZhbHVlQWZ0ZXIoJ09yaWdlbScscm9vdCksZD12YWx1ZUFmdGVyKCdEZXN0aW5vJyxyb290KTt2YXIgYnRucz1BcnJheS5mcm9tKHJvb3QucXVlcnlTZWxlY3RvckFsbCgnYnV0dG9uJykpO3ZhciBmbGlnaHQ9YnRucy5maW5kKGZ1bmN0aW9uKGIpe3JldHVybiB0KGIpLmluY2x1ZGVzKCdWaW5jdWxhciB2b28nKX0pO3ZhciBjbG9zZT1idG5zLmZpbmQoZnVuY3Rpb24oYil7cmV0dXJuIHQoYik9PT0nRmVjaGFyJ30pO3ZhciBib3g9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7Ym94LmNsYXNzTmFtZT0nZHAyOHJvdXRlJztib3guaW5uZXJIVE1MPSc8ZGl2IGNsYXNzPWRwMjhyb3V0ZVRpdGxlPvCfl7rvuI8gUk9UQSBEQSBDT1JSSURBPC9kaXY+PGRpdiBjbGFzcz1kcDI4cm91dGVHcmlkPjxidXR0b24gY2xhc3M9XCJkcDI4cm91dGVCdG4gZHAyOG1hcHNcIj5Hb29nbGUgTWFwczwvYnV0dG9uPjxidXR0b24gY2xhc3M9XCJkcDI4cm91dGVCdG4gZHAyOHdhemVcIj5XYXplPC9idXR0b24+PC9kaXY+Jztib3gucXVlcnlTZWxlY3RvcignLmRwMjhtYXBzJykub25jbGljaz1mdW5jdGlvbigpe21hcHMobyxkKX07Ym94LnF1ZXJ5U2VsZWN0b3IoJy5kcDI4d2F6ZScpLm9uY2xpY2s9ZnVuY3Rpb24oKXt3YXplKGQpfTtpZihmbGlnaHQmJmZsaWdodC5wYXJlbnRFbGVtZW50KWZsaWdodC5wYXJlbnRFbGVtZW50Lmluc2VydEJlZm9yZShib3gsZmxpZ2h0KTtlbHNlIHJvb3QuYXBwZW5kQ2hpbGQoYm94KTtpZihjbG9zZSYmY2xvc2UucGFyZW50RWxlbWVudCl7dmFyIHA9Y2xvc2UucGFyZW50RWxlbWVudDtjbG9zZS5yZW1vdmUoKTtwLmFwcGVuZENoaWxkKGNsb3NlKX19IiArCiAgICAgICJmdW5jdGlvbiBydW4oKXt3aXJlQ2FyZCgnQ0xJRU5URVMnLCdDbGllbnRlcycpO3dpcmVDYXJkKCdDT1RBw4fDlUVTJywnQ290YcOnw7VlcycpO3JpZGUoKX0iICsKICAgICAgInJ1bigpO25ldyBNdXRhdGlvbk9ic2VydmVyKGZ1bmN0aW9uKCl7c2V0VGltZW91dChydW4sNDApfSkub2JzZXJ2ZShkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQse2NoaWxkTGlzdDp0cnVlLHN1YnRyZWU6dHJ1ZX0pO3NldEludGVydmFsKHJ1biwxNjAwKTsiICsKICAgICAgIn1jYXRjaChlKXtjb25zb2xlLmxvZygnZHAyOCcsZSl9fSkoKTsiOwogICAgd2ViVmlldy5ldmFsdWF0ZUphdmFzY3JpcHQoanMsIG51bGwpOwogIH0K
+        run: |
+          python3 <<'PY28'
+          from pathlib import Path
+          import os, base64
+          p = Path("app/src/main/java/com/driverpro/app/MainActivity.java")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("injectNavigationNativeUi();", "injectNavigationNativeUi();\n        injectV28AgendaOperationalUi();")
+          method = base64.b64decode(os.environ["V28_METHOD_B64"]).decode("utf-8")
+          pos = s.rfind("\n}")
+          if pos < 0:
+              raise SystemExit("MainActivity closing brace not found")
+          s = s[:pos] + "\n" + method + s[pos:]
+          p.write_text(s, encoding="utf-8")
+          PY28
+          grep -q "injectV28AgendaOperationalUi" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "ROTA DA CORRIDA" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "dp28routeGrid" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v28
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v28-Agenda-Operacional.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v28-Agenda-Operacional-APK
+          path: Driver-Pro-v28-Agenda-Operacional.apk
+          retention-days: 30
