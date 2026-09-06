@@ -1,0 +1,152 @@
+name: Build Driver Pro v26 Navigation Fix
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+
+      - name: Detect permanent signing alias
+        shell: bash
+        run: |
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v26 weather + fixed navigation UI
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v25-navigation.yml" -o v25-source.yml
+          python3 <<'PATCH'
+          from pathlib import Path
+          src = Path('v25-source.yml').read_text(encoding='utf-8')
+          marker = "          python3 <<'PY'\n"
+          start = src.index(marker) + len(marker)
+          end = src.index("\n          PY", start)
+          code = src[start:end]
+          lines = code.splitlines()
+          code = "\n".join((ln[10:] if ln.startswith('          ') else ln) for ln in lines) + "\n"
+
+          code = code.replace('&v=25', '&v=26')
+          code = code.replace('1.0.25', '1.0.26')
+          code = code.replace('android-v25', 'android-v26')
+          code = code.replace('versionCode 25', 'versionCode 26')
+          code = code.replace("versionName '1.0.25'", "versionName '1.0.26'")
+
+          old = ".dp25stop{display:flex;gap:8px;align-items:flex-end}.dp25stop .dp25field{flex:1}"
+          new = ".dp25stop{display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important;align-items:end!important;width:100%!important}.dp25stop .dp25field{min-width:0!important;width:100%!important;max-width:none!important}.dp25stop .dp25input{width:100%!important;min-width:0!important}.dp25stop .dp25suggest{left:0!important;right:0!important;width:auto!important;max-width:100%!important}"
+          if old not in code:
+              raise SystemExit('v25 stop CSS anchor not found')
+          code = code.replace(old, new)
+
+          old2 = ".dp25danger{background:#522634;color:#fff}"
+          new2 = ".dp25danger{background:#522634;color:#fff;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;margin:0!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:22px!important;line-height:1!important}"
+          if old2 not in code:
+              raise SystemExit('v25 delete button CSS anchor not found')
+          code = code.replace(old2, new2)
+
+          old3 = ".dp25close{float:right;width:48px;height:48px;"
+          new3 = ".dp25close{float:right;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;"
+          if old3 in code:
+              code = code.replace(old3, new3)
+
+          Path('/tmp/apply_v26.py').write_text(code, encoding='utf-8')
+          PATCH
+
+          python3 /tmp/apply_v26.py
+
+          grep -q "versionCode 26" app/build.gradle
+          grep -q "versionName '1.0.26'" app/build.gradle
+          grep -q "grid-template-columns:minmax(0,1fr) 48px" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "width:48px!important" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v26
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v26-Navigation-Fix.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v26-Navigation-Fix-APK
+          path: Driver-Pro-v26-Navigation-Fix.apk
+          retention-days: 30
