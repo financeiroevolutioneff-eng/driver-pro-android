@@ -1,0 +1,161 @@
+name: Build Driver Pro v24 Weather Design Final
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+
+      - name: Detect permanent signing alias
+        shell: bash
+        run: |
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v24 final weather UI
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          mp = Path("app/src/main/java/com/driverpro/app/MainActivity.java")
+          pp = Path("app/src/main/java/com/driverpro/app/PushBridge.java")
+          gp = Path("app/build.gradle")
+
+          main = mp.read_text(encoding="utf-8")
+          main = main.replace("&v=21", "&v=24")
+          main = main.replace("injectStableUi();", "injectStableUi();\n        injectWeatherNativeUi();")
+
+          method = r'''
+            private void injectWeatherNativeUi() {
+              if (webView == null) return;
+              String js =
+                "(function(){try{" +
+                "if(document.getElementById('dp24Weather'))return;" +
+                "var st=document.createElement('style');st.id='dp24WeatherStyle';st.textContent=" +
+                "'#dp24Weather{margin:14px 16px;padding:16px 18px;border:1px solid #315b7d;border-radius:22px;background:linear-gradient(135deg,#0e3c60,#0a2742);color:#fff;box-shadow:0 8px 24px #0003;font-family:system-ui;cursor:pointer}'+" +
+                "'#dp24Weather .r{display:flex;align-items:center;justify-content:space-between;gap:12px}#dp24Weather .temp{font-size:38px;font-weight:850}#dp24Weather .ico{font-size:44px}#dp24Weather .muted{opacity:.72;font-size:13px;margin-top:7px}'+" +
+                "'#dp24WxModal{position:fixed;inset:0;background:#000a;z-index:2147483646;display:flex;align-items:flex-end}#dp24WxSheet{width:100%;max-height:88vh;overflow:auto;background:#07182a;color:#fff;border-radius:28px 28px 0 0;padding:20px;font-family:system-ui}'+" +
+                "'#dp24WxClose{float:right;width:48px;height:48px;border-radius:50%;border:1px solid #416b8c;background:#0d2a46;color:#fff;font-size:28px;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1;padding:0;box-shadow:0 4px 12px #0003}.dp24days{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}.dp24day{background:#0d2a46;border:1px solid #315b7d;border-radius:16px;padding:12px;text-align:center}.dp24hours{display:flex;gap:10px;overflow-x:auto;padding:4px 0 10px}.dp24hour{min-width:92px;background:#0d2a46;border:1px solid #315b7d;border-radius:14px;padding:10px;text-align:center}';document.head.appendChild(st);" +
+                "function icon(t){t=String(t||'').toLowerCase();if(t.includes('tempest'))return '⛈️';if(t.includes('chuva')||t.includes('pancada')||t.includes('garoa'))return '🌧️';if(t.includes('nuv')||t.includes('encob'))return '☁️';if(t.includes('sol')||t.includes('claro'))return '☀️';return '🌤️';}" +
+                "function cur(d){var x=d&&d.current||{};return{t:x.temperature??'--',f:x.feels_like,h:x.humidity,c:x.condition||'Clima agora'};}" +
+                "function openWx(d){document.getElementById('dp24WxModal')?.remove();var c=cur(d),m=document.createElement('div');m.id='dp24WxModal';var hrs=(d.remainingToday||[]).slice(0,8).map(function(h){var tm=String(h.time||'').split(' ')[1]||'';return '<div class=dp24hour><b>'+tm+'</b><div style=font-size:24px;margin:6px>'+icon(h.condition)+'</div><div>'+h.temperature+'°</div><div style=font-size:11px;opacity:.75>💧 '+(h.rain_probability??0)+'%</div></div>';}).join('');var cards=(d.forecast||[]).slice(0,3).map(function(x,i){var q=x.temperature||{},mn=q.min??'--',mx=q.max??'--',rp=x.rain&&x.rain.probability,label=i===0?'Hoje':i===1?'Amanhã':'Dia 3';return '<div class=dp24day><b>'+label+'</b><div style=font-size:28px;margin:8px>'+icon(x.condition)+'</div><div>'+mn+'° / <b>'+mx+'°</b></div>'+(rp!=null?'<div style=font-size:12px;margin-top:6px>💧 '+rp+'%</div>':'')+'</div>';}).join('');m.innerHTML='<div id=dp24WxSheet><button id=dp24WxClose aria-label=Fechar>×</button><div style=font-size:13px;opacity:.7>📍 '+((d.locale&&d.locale.name)||'Vinhedo')+' • '+((d.locale&&d.locale.state)||'SP')+'</div><div style=font-size:28px;font-weight:850;margin-top:3px>Previsão do tempo</div><div style=display:flex;align-items:center;gap:14px;margin-top:15px><div style=font-size:56px>'+icon(c.c)+'</div><div><div style=font-size:42px;font-weight:850>'+c.t+'°</div><div>'+c.c+'</div>'+(c.f!=null?'<div style=opacity:.7>Sensação '+c.f+'°</div>':'')+(c.h!=null?'<div style=opacity:.7>Umidade '+c.h+'%</div>':'')+'</div></div>'+(hrs?'<div style=margin-top:18px;font-weight:750>Restante de hoje</div><div class=dp24hours>'+hrs+'</div>':'')+'<div class=dp24days>'+cards+'</div><div style=opacity:.5;font-size:11px;text-align:center;margin-top:14px>Dados: WeatherAPI</div></div>';document.body.appendChild(m);document.getElementById('dp24WxClose').onclick=function(e){e.stopPropagation();m.remove()};m.onclick=function(e){if(e.target===m)m.remove()};}" +
+                "var c=document.createElement('div');c.id='dp24Weather';c.innerHTML='<div class=r><div><div style=font-size:12px;color:#f4c94c;font-weight:700>CLIMA AGORA</div><div id=dp24Cond style=font-size:17px;font-weight:700;margin-top:3px>Carregando clima…</div><div class=muted id=dp24Meta>Vinhedo • SP</div></div><div class=ico id=dp24Ico>🌤️</div><div class=temp id=dp24Temp>--°</div></div><div class=muted>Toque para ver o restante do dia e próximos dias</div>';" +
+                "var f=document.getElementById('dp21FlightCard'),h=document.querySelector('.card.hero');if(f&&f.parentNode)f.parentNode.insertBefore(c,f);else if(h&&h.parentNode)h.parentNode.insertBefore(c,h.nextSibling);else(document.querySelector('main')||document.body).prepend(c);" +
+                "function fail(msg){document.getElementById('dp24Cond').textContent='Clima indisponível';document.getElementById('dp24Meta').textContent=msg||'Tente novamente';}" +
+                "if(typeof edge!=='function'){fail('Conexão do clima indisponível');return;}" +
+                "edge('weather-climatempo',{city:'Vinhedo',state:'SP'}).then(function(d){if(!d||d.ok===false){fail((d&&d.message)||'Clima indisponível');return;}var x=cur(d);document.getElementById('dp24Temp').textContent=x.t+'°';document.getElementById('dp24Cond').textContent=x.c;document.getElementById('dp24Ico').textContent=icon(x.c);document.getElementById('dp24Meta').textContent=((d.locale&&d.locale.name)||'Vinhedo')+' • '+((d.locale&&d.locale.state)||'SP')+(x.h!=null?' • Umidade '+x.h+'%':'');c.onclick=function(){openWx(d)};}).catch(function(e){fail((e&&e.message)||'Clima indisponível');});" +
+                "}catch(e){console.log('dp24 weather',e);}})();";
+              webView.evaluateJavascript(js, null);
+            }
+          '''
+
+          pos = main.rfind("\n}")
+          if pos < 0:
+              raise SystemExit("MainActivity closing brace not found")
+          main = main[:pos] + "\n" + method + main[pos:]
+          mp.write_text(main, encoding="utf-8")
+
+          push = pp.read_text(encoding="utf-8").replace("1.0.21","1.0.24").replace("android-v21","android-v24")
+          pp.write_text(push, encoding="utf-8")
+
+          gradle = gp.read_text(encoding="utf-8").replace("versionCode 21","versionCode 24").replace("versionName '1.0.21'","versionName '1.0.24'")
+          gp.write_text(gradle, encoding="utf-8")
+          PY
+
+          grep -q "versionCode 24" app/build.gradle
+          grep -q "versionName '1.0.24'" app/build.gradle
+          grep -q "dp24WxClose" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "Dados: WeatherAPI" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v24
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v24-Weather-Design-Final.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v24-Weather-Design-Final-APK
+          path: Driver-Pro-v24-Weather-Design-Final.apk
+          retention-days: 30
