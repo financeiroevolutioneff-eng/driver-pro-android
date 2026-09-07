@@ -1,0 +1,290 @@
+name: Build Driver Pro v36 PDF Fix
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRIVER_PRO_KEYSTORE_PATH: ${{ github.workspace }}/driver-pro-release.jks
+      DRIVER_PRO_STORE_PASSWORD: ${{ secrets.DRIVER_PRO_STORE_PASSWORD }}
+      DRIVER_PRO_KEY_PASSWORD: ${{ secrets.DRIVER_PRO_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVER_PRO_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          test -n "$DRIVER_PRO_STORE_PASSWORD"
+          test -n "$DRIVER_PRO_KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$DRIVER_PRO_KEYSTORE_PATH"
+          test -s "$DRIVER_PRO_KEYSTORE_PATH"
+
+      - name: Detect permanent signing alias
+        shell: bash
+        run: |
+          ACTUAL_ALIAS="$(keytool -list -v -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | sed -n 's/^Alias name: //p' | head -1)"
+          if [ -z "$ACTUAL_ALIAS" ]; then
+            ACTUAL_ALIAS="$(keytool -list -keystore "$DRIVER_PRO_KEYSTORE_PATH" -storepass "$DRIVER_PRO_STORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+          fi
+          test -n "$ACTUAL_ALIAS"
+          echo "DRIVER_PRO_KEY_ALIAS=$ACTUAL_ALIAS" >> "$GITHUB_ENV"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare base Driver Pro Android
+        shell: bash
+        run: |
+          curl -fsSL "https://nbsrkkonqqfuualojzxq.supabase.co/functions/v1/driver-pro-apk-bootstrap?key=v16" -o bootstrap.sh
+          bash bootstrap.sh
+
+      - name: Restore proven v21 sources
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v21-permanent-signed-corrected.yml" -o v21-source.yml
+          MAIN_B64="$(sed -n 's/^          MAIN_B64: //p' v21-source.yml | head -1)"
+          PUSH_B64="$(sed -n 's/^          PUSH_B64: //p' v21-source.yml | head -1)"
+          MSG_B64="$(sed -n 's/^          MSG_B64: //p' v21-source.yml | head -1)"
+          GRADLE_B64="$(sed -n 's/^          GRADLE_B64: //p' v21-source.yml | head -1)"
+          test -n "$MAIN_B64" && test -n "$PUSH_B64" && test -n "$MSG_B64" && test -n "$GRADLE_B64"
+          printf '%s' "$MAIN_B64" | base64 -d > app/src/main/java/com/driverpro/app/MainActivity.java
+          printf '%s' "$PUSH_B64" | base64 -d > app/src/main/java/com/driverpro/app/PushBridge.java
+          printf '%s' "$MSG_B64" | base64 -d > app/src/main/java/com/driverpro/app/DriverProMessagingService.java
+          printf '%s' "$GRADLE_B64" | base64 -d > app/build.gradle
+
+      - name: Apply v36 Stable Core
+        shell: bash
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/financeiroevolutioneff-eng/driver-pro-android/main/.github/workflows/build-apk-v25-navigation.yml" -o v25-source.yml
+          python3 <<'PATCH'
+          from pathlib import Path
+          src = Path('v25-source.yml').read_text(encoding='utf-8')
+          marker = "          python3 <<'PY'\n"
+          start = src.index(marker) + len(marker)
+          end = src.index("\n          PY", start)
+          code = src[start:end]
+          lines = code.splitlines()
+          code = "\n".join((ln[10:] if ln.startswith('          ') else ln) for ln in lines) + "\n"
+
+          code = code.replace('&v=25', '&v=36')
+          code = code.replace('1.0.25', '1.0.36')
+          code = code.replace('android-v25', 'android-v36')
+          code = code.replace('versionCode 25', 'versionCode 36')
+          code = code.replace("versionName '1.0.25'", "versionName '1.0.36'")
+
+          old = ".dp25stop{display:flex;gap:8px;align-items:flex-end}.dp25stop .dp25field{flex:1}"
+          new = ".dp25stop{display:grid!important;grid-template-columns:minmax(0,1fr) 48px!important;gap:8px!important;align-items:end!important;width:100%!important}.dp25stop .dp25field{min-width:0!important;width:100%!important;max-width:none!important}.dp25stop .dp25input{width:100%!important;min-width:0!important}.dp25stop .dp25suggest{left:0!important;right:0!important;width:auto!important;max-width:100%!important}"
+          if old not in code:
+              raise SystemExit('v25 stop CSS anchor not found')
+          code = code.replace(old, new)
+
+          old2 = ".dp25danger{background:#522634;color:#fff}"
+          new2 = ".dp25danger{background:#522634;color:#fff;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;margin:0!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:22px!important;line-height:1!important}"
+          if old2 not in code:
+              raise SystemExit('v25 delete button CSS anchor not found')
+          code = code.replace(old2, new2)
+
+          old3 = ".dp25close{float:right;width:48px;height:48px;"
+          new3 = ".dp25close{float:right;width:48px!important;min-width:48px!important;max-width:48px!important;height:48px!important;padding:0!important;"
+          if old3 in code:
+              code = code.replace(old3, new3)
+
+          # Rota Rápida: mantém a ferramenta manual como função secundária.
+          code = code.replace('NAVEGAÇÃO', 'ROTA RÁPIDA')
+          code = code.replace('🗺️ Iniciar transporte', '🗺️ Planejar deslocamento')
+          code = code.replace('Origem • paradas • destino final', 'Consultar rota • paradas • imprevistos')
+          code = code.replace('ROTA DA CORRIDA', 'ROTA RÁPIDA')
+          code = code.replace('Iniciar transporte', 'Planejar deslocamento')
+          code = code.replace('Busque endereços, adicione paradas e abra a rota.', 'Monte uma rota avulsa, adicione paradas e abra no navegador.')
+          Path('/tmp/apply_v26.py').write_text(code, encoding='utf-8')
+          PATCH
+
+          python3 /tmp/apply_v26.py
+
+          grep -q "versionCode 36" app/build.gradle
+          grep -q "versionName '1.0.36'" app/build.gradle
+          grep -q "grid-template-columns:minmax(0,1fr) 48px" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "width:48px!important" app/src/main/java/com/driverpro/app/MainActivity.java
+
+
+      - name: Apply v36 stable host and flight patch
+        shell: bash
+        env:
+          V34_METHOD_B64: CiAgcHJpdmF0ZSB2b2lkIGluamVjdEZsaWdodFBhdGNoU2NyaXB0KCkgewogICAgaWYgKHdlYlZpZXcgPT0gbnVsbCkgcmV0dXJuOwogICAgU3RyaW5nIGpzID0KICAgICAgIihmdW5jdGlvbigpe3RyeXsiICsKICAgICAgImlmKGRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdkcEZsaWdodFBhdGNoU2NyaXB0JykpcmV0dXJuOyIgKwogICAgICAidmFyIHM9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnc2NyaXB0Jyk7IiArCiAgICAgICJzLmlkPSdkcEZsaWdodFBhdGNoU2NyaXB0JzsiICsKICAgICAgInMuc3JjPSdodHRwczovL25ic3Jra29ucXFmdXVhbG9qenhxLnN1cGFiYXNlLmNvL2Z1bmN0aW9ucy92MS9kcml2ZXItcHJvLWZsaWdodC1hZ2VuZGEtdWktdjE4P3Y9MzYnOyIgKwogICAgICAicy5hc3luYz1mYWxzZTsiICsKICAgICAgImRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQocyk7IiArCiAgICAgICJ9Y2F0Y2goZSl7Y29uc29sZS5sb2coJ2ZsaWdodFBhdGNoJyxlKX19KSgpOyI7CiAgICB3ZWJWaWV3LmV2YWx1YXRlSmF2YXNjcmlwdChqcywgbnVsbCk7CiAgfQo=
+        run: |
+          python3 <<'PY34'
+          from pathlib import Path
+          import os, base64
+
+          p = Path("app/src/main/java/com/driverpro/app/MainActivity.java")
+          s = p.read_text(encoding="utf-8")
+
+          # Use the real app directly: eliminates the old Preview v18 loading shell.
+          s = s.replace(
+              'https://driver-pro-preview-v18.vercel.app/?app=android&nativePush=1&v=36',
+              'https://driver-pro-lemon.vercel.app/?app=android&nativePush=1&v=36'
+          )
+          s = s.replace(
+              'private static final String HOST = "driver-pro-preview-v18.vercel.app";',
+              'private static final String HOST = "driver-pro-lemon.vercel.app";'
+          )
+
+          # Load flight/agenda patch after the real app HTML is ready.
+          s = s.replace(
+              "injectStableUi();",
+              "injectFlightPatchScript();\n        injectStableUi();"
+          )
+
+          method = base64.b64decode(os.environ["V34_METHOD_B64"]).decode("utf-8")
+          pos = s.rfind("\n}")
+          if pos < 0:
+              raise SystemExit("MainActivity closing brace not found")
+          s = s[:pos] + "\n" + method + s[pos:]
+          p.write_text(s, encoding="utf-8")
+          PY34
+
+          grep -q "driver-pro-lemon.vercel.app/?app=android&nativePush=1&v=36" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q 'HOST = "driver-pro-lemon.vercel.app"' app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "injectFlightPatchScript" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "driver-pro-flight-agenda-ui-v18?v=36" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Apply isolated native export bridge
+        shell: bash
+        run: |
+          python3 <<'PYEXP'
+          from pathlib import Path
+          p = Path("app/src/main/java/com/driverpro/app/MainActivity.java")
+          s = p.read_text(encoding="utf-8")
+
+          anchor = "import android.content.Intent;\n"
+          imports = """import android.content.ContentValues;\nimport android.os.Environment;\nimport android.provider.MediaStore;\nimport android.util.Base64;\nimport android.widget.Toast;\nimport java.io.File;\nimport java.io.FileOutputStream;\nimport java.io.OutputStream;\n"""
+          if "import android.content.ContentValues;" not in s:
+              if anchor not in s:
+                  raise SystemExit("import anchor not found")
+              s = s.replace(anchor, anchor + imports)
+
+          bridge_anchor = 'webView.addJavascriptInterface(new NativeBridge(), "DriverProNative");'
+          if bridge_anchor not in s:
+              raise SystemExit("native bridge anchor not found")
+          if 'DriverProExport' not in s:
+              s = s.replace(bridge_anchor, bridge_anchor + '\n    webView.addJavascriptInterface(new ExportBridge(), "DriverProExport");')
+
+          call_anchor = "injectFlightPatchScript();\n        injectStableUi();"
+          if call_anchor in s and "injectExportBridge();" not in s:
+              s = s.replace(call_anchor, call_anchor + "\n        injectExportBridge();")
+
+          addition = r'''
+            private void injectExportBridge() {
+              if (webView == null) return;
+              String js = "(function(){if(window.__dpExportBridge)return;window.__dpExportBridge=true;" +
+                "function send(a){try{if(!a||!a.hasAttribute('download'))return false;var h=a.href||'';var n=a.getAttribute('download')||'Driver-Pro-arquivo';" +
+                "if(h.indexOf('data:')===0){var m=h.match(/^data:([^;,]+)?(;base64)?,(.*)$/);if(!m)return false;var mime=m[1]||'application/octet-stream';var b64=m[2]?m[3]:btoa(unescape(encodeURIComponent(decodeURIComponent(m[3]))));DriverProExport.saveBase64(n,mime,b64);return true;}" +
+                "if(h.indexOf('blob:')===0){fetch(h).then(function(r){return r.blob()}).then(function(b){var fr=new FileReader();fr.onloadend=function(){var z=String(fr.result||'');var i=z.indexOf(',');DriverProExport.saveBase64(n,b.type||'application/octet-stream',i>=0?z.substring(i+1):z)};fr.readAsDataURL(b)});return true;}" +
+                "}catch(e){console.log('export',e)}return false;}" +
+                "var old=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){if(send(this))return;return old.call(this)};" +
+                "function patchPdf(){try{var J=window.jspdf&&window.jspdf.jsPDF;if(!J||!J.prototype||J.prototype.__dpSavePatched)return false;var orig=J.prototype.save;J.prototype.save=function(name,opts){try{var fn=(name||'Driver-Pro-orcamento.pdf');var ds=this.output('datauristring');var i=String(ds||'').indexOf(',');if(i>=0){DriverProExport.saveBase64(fn,'application/pdf',String(ds).substring(i+1));return this;}}catch(e){console.log('pdfbridge',e)}return orig.apply(this,arguments)};J.prototype.__dpSavePatched=true;return true}catch(e){return false}}" +
+                "patchPdf();setTimeout(patchPdf,300);setTimeout(patchPdf,1000);setTimeout(patchPdf,2500);" +
+                "document.addEventListener('click',function(e){var t=e.target;var txt=(t&&t.textContent||'').trim();if(txt.indexOf('Gerar PDF')>=0)patchPdf();var a=t&&t.closest?t.closest('a[download]'):null;if(a&&send(a)){e.preventDefault();e.stopPropagation()}},true);" +
+                "})();";
+              webView.evaluateJavascript(js, null);
+            }
+          
+            private class ExportBridge {
+              @JavascriptInterface
+              public void saveBase64(String filename, String mime, String base64Data) {
+                final String safeName = (filename == null || filename.trim().isEmpty()) ? "Driver-Pro-arquivo" : filename.replaceAll("[\\\\/:*?\"<>|]", "_");
+                final String safeMime = (mime == null || mime.trim().isEmpty()) ? "application/octet-stream" : mime;
+                final String payload = base64Data == null ? "" : base64Data;
+                new Thread(() -> {
+                  try {
+                    byte[] bytes = Base64.decode(payload, Base64.DEFAULT);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      ContentValues values = new ContentValues();
+                      values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+                      values.put(MediaStore.MediaColumns.MIME_TYPE, safeMime);
+                      values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Driver Pro");
+                      android.net.Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                      if (uri == null) throw new Exception("Falha ao criar arquivo");
+                      try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                        if (out == null) throw new Exception("Falha ao abrir arquivo");
+                        out.write(bytes);
+                      }
+                    } else {
+                      File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                      if (dir == null) throw new Exception("Pasta de downloads indisponível");
+                      if (!dir.exists()) dir.mkdirs();
+                      try (FileOutputStream out = new FileOutputStream(new File(dir, safeName))) {
+                        out.write(bytes);
+                      }
+                    }
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this, "Arquivo salvo em Downloads/Driver Pro", Toast.LENGTH_LONG).show());
+                  } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this, "Não foi possível salvar o arquivo", Toast.LENGTH_LONG).show());
+                  }
+                }).start();
+              }
+            }
+          '''
+          if "private class ExportBridge" not in s:
+              pos = s.rfind("\n}")
+              if pos < 0:
+                  raise SystemExit("MainActivity closing brace not found")
+              s = s[:pos] + "\n" + addition + s[pos:]
+          p.write_text(s, encoding="utf-8")
+          PYEXP
+
+          grep -q "DriverProExport" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "injectExportBridge" app/src/main/java/com/driverpro/app/MainActivity.java
+          grep -q "Downloads/Driver Pro" app/src/main/java/com/driverpro/app/MainActivity.java
+
+      - name: Correct Driver Pro logo extension
+        shell: bash
+        run: |
+          if [ -f app/src/main/res/drawable/driver_pro_logo.png ]; then
+            mv app/src/main/res/drawable/driver_pro_logo.png app/src/main/res/drawable/driver_pro_logo.webp
+          fi
+          test -f app/src/main/res/drawable/driver_pro_logo.webp
+
+      - name: Build permanently signed APK v36
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Driver-Pro-v36-Export-Fix.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Driver-Pro-v36-Export-Fix-APK
+          path: Driver-Pro-v36-Export-Fix.apk
+          retention-days: 30
